@@ -1,0 +1,525 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Arunika Telecom (fictional) AI-assisted contact centre demo: Amazon Connect + Lex V2 +
+  Lambda + Amazon Bedrock + Contact Lens. Pre-sales demo environment, not production.
+  NOTE: deploy build/template.yaml (rendered by scripts/render_template.py), not this file.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Amazon Connect }
+        Parameters: [InstanceAlias, AgentHours]
+      - Label: { default: Generative AI }
+        Parameters: [BedrockModelId]
+      - Label: { default: Lambda package (uploaded by scripts/deploy.sh) }
+        Parameters: [LambdaCodeS3Bucket, LambdaCodeS3Key]
+
+Parameters:
+  InstanceAlias:
+    Type: String
+    Description: >-
+      Globally unique Connect instance alias. It becomes https://<alias>.my.connect.aws
+    AllowedPattern: "^(?!d-)([\\da-zA-Z]+)([-]*[\\da-zA-Z])*$"
+    MinLength: 1
+    MaxLength: 45
+  AgentHours:
+    Type: String
+    Description: >-
+      AlwaysOpen keeps the queue open 24x7 so a demo works at any time of day.
+      BusinessHours uses 08:00-22:00 WIB, so you can show the after-hours branch.
+    AllowedValues: [AlwaysOpen, BusinessHours]
+    Default: AlwaysOpen
+  BedrockModelId:
+    Type: String
+    Description: >-
+      Bedrock cross-Region inference profile ID used for FAQ answers. The default APAC profile
+      keeps inference inside Asia Pacific Regions. Format: <geo>.<provider>.<model>:<n>
+    Default: apac.amazon.nova-lite-v1:0
+    AllowedPattern: "^[a-z]+\\.[a-z0-9-]+\\.[a-z0-9.-]+:[0-9]+$"
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket that holds the zipped fulfillment Lambda.
+  LambdaCodeS3Key:
+    Type: String
+    Description: S3 key of the zipped fulfillment Lambda (content-hashed, so code changes redeploy).
+
+Conditions:
+  IsAlwaysOpen: !Equals [!Ref AgentHours, AlwaysOpen]
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Amazon Connect instance, storage and routing
+  # ---------------------------------------------------------------------------
+  ConnectInstance:
+    Type: AWS::Connect::Instance
+    Properties:
+      IdentityManagementType: CONNECT_MANAGED
+      InstanceAlias: !Ref InstanceAlias
+      Attributes:
+        InboundCalls: true
+        OutboundCalls: true
+        ContactflowLogs: true
+        ContactLens: true
+        AutoResolveBestVoices: true
+        EarlyMedia: true
+        UseCustomTTSVoices: false
+      Tags:
+        - Key: project
+          Value: amazon-connect-ai-contact-centre
+
+  StorageBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-demo-data
+            Status: Enabled
+            ExpirationInDays: 30
+
+  StorageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StorageBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt StorageBucket.Arn
+              - !Sub "${StorageBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  ChatTranscriptStorage:
+    Type: AWS::Connect::InstanceStorageConfig
+    Properties:
+      InstanceArn: !GetAtt ConnectInstance.Arn
+      ResourceType: CHAT_TRANSCRIPTS
+      StorageType: S3
+      S3Config:
+        BucketName: !Ref StorageBucket
+        BucketPrefix: chat-transcripts
+
+  CallRecordingStorage:
+    Type: AWS::Connect::InstanceStorageConfig
+    Properties:
+      InstanceArn: !GetAtt ConnectInstance.Arn
+      ResourceType: CALL_RECORDINGS
+      StorageType: S3
+      S3Config:
+        BucketName: !Ref StorageBucket
+        BucketPrefix: call-recordings
+
+  CustomerCareHours:
+    Type: AWS::Connect::HoursOfOperation
+    Properties:
+      InstanceArn: !GetAtt ConnectInstance.Arn
+      Name: Arunika Customer Care Hours
+      Description: !If
+        - IsAlwaysOpen
+        - Open 24x7 for demos
+        - 08:00-22:00 WIB every day
+      TimeZone: Asia/Jakarta
+      Config:
+        - Day: MONDAY
+          StartTime: { Hours: !If [IsAlwaysOpen, 0, 8], Minutes: 0 }
+          EndTime: { Hours: !If [IsAlwaysOpen, 23, 22], Minutes: !If [IsAlwaysOpen, 59, 0] }
+        - Day: TUESDAY
+          StartTime: { Hours: !If [IsAlwaysOpen, 0, 8], Minutes: 0 }
+          EndTime: { Hours: !If [IsAlwaysOpen, 23, 22], Minutes: !If [IsAlwaysOpen, 59, 0] }
+        - Day: WEDNESDAY
+          StartTime: { Hours: !If [IsAlwaysOpen, 0, 8], Minutes: 0 }
+          EndTime: { Hours: !If [IsAlwaysOpen, 23, 22], Minutes: !If [IsAlwaysOpen, 59, 0] }
+        - Day: THURSDAY
+          StartTime: { Hours: !If [IsAlwaysOpen, 0, 8], Minutes: 0 }
+          EndTime: { Hours: !If [IsAlwaysOpen, 23, 22], Minutes: !If [IsAlwaysOpen, 59, 0] }
+        - Day: FRIDAY
+          StartTime: { Hours: !If [IsAlwaysOpen, 0, 8], Minutes: 0 }
+          EndTime: { Hours: !If [IsAlwaysOpen, 23, 22], Minutes: !If [IsAlwaysOpen, 59, 0] }
+        - Day: SATURDAY
+          StartTime: { Hours: !If [IsAlwaysOpen, 0, 8], Minutes: 0 }
+          EndTime: { Hours: !If [IsAlwaysOpen, 23, 22], Minutes: !If [IsAlwaysOpen, 59, 0] }
+        - Day: SUNDAY
+          StartTime: { Hours: !If [IsAlwaysOpen, 0, 8], Minutes: 0 }
+          EndTime: { Hours: !If [IsAlwaysOpen, 23, 22], Minutes: !If [IsAlwaysOpen, 59, 0] }
+
+  CustomerCareQueue:
+    Type: AWS::Connect::Queue
+    Properties:
+      InstanceArn: !GetAtt ConnectInstance.Arn
+      Name: Customer Care
+      Description: Human agents for billing, outage and general enquiries escalated by the bot
+      HoursOfOperationArn: !GetAtt CustomerCareHours.HoursOfOperationArn
+
+  CustomerCareRoutingProfile:
+    Type: AWS::Connect::RoutingProfile
+    Properties:
+      InstanceArn: !GetAtt ConnectInstance.Arn
+      Name: Customer Care Agent
+      Description: One voice call or up to three chats at a time
+      DefaultOutboundQueueArn: !GetAtt CustomerCareQueue.QueueArn
+      MediaConcurrencies:
+        - Channel: VOICE
+          Concurrency: 1
+        - Channel: CHAT
+          Concurrency: 3
+      QueueConfigs:
+        - Delay: 0
+          Priority: 1
+          QueueReference:
+            Channel: VOICE
+            QueueArn: !GetAtt CustomerCareQueue.QueueArn
+        - Delay: 0
+          Priority: 1
+          QueueReference:
+            Channel: CHAT
+            QueueArn: !GetAtt CustomerCareQueue.QueueArn
+
+  # ---------------------------------------------------------------------------
+  # Fulfillment Lambda (Lex code hook) with Amazon Bedrock access
+  # ---------------------------------------------------------------------------
+  FulfillmentLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-fulfillment
+      RetentionInDays: 14
+
+  FulfillmentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${FulfillmentLogGroup.Arn}"
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # A cross-Region inference profile needs permission on the profile in the
+              # source Region AND on the foundation model in every destination Region.
+              - Sid: InvokeViaInferenceProfile
+                Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}
+                  - !Sub
+                    - arn:${AWS::Partition}:bedrock:*::foundation-model/${FoundationModelId}
+                    - FoundationModelId: !Join
+                        - "."
+                        - - !Select [1, !Split [".", !Ref BedrockModelId]]
+                          - !Select [2, !Split [".", !Ref BedrockModelId]]
+
+  FulfillmentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-fulfillment
+      Description: Lex V2 fulfillment for the Arunika demo (slot answers + Bedrock FAQ)
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: handler.lambda_handler
+      MemorySize: 256
+      Timeout: 15
+      Role: !GetAtt FulfillmentRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BEDROCK_MAX_TOKENS: "300"
+          LOG_LEVEL: INFO
+      LoggingConfig:
+        LogGroup: !Ref FulfillmentLogGroup
+
+  LexInvokeFulfillmentPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt FulfillmentFunction.Arn
+      Principal: lexv2.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      # Any alias of this bot (the "live" alias and the console's TestBotAlias).
+      SourceArn: !Sub arn:${AWS::Partition}:lex:${AWS::Region}:${AWS::AccountId}:bot-alias/${LexBot}/*
+
+  # ---------------------------------------------------------------------------
+  # Amazon Lex V2 bot
+  # ---------------------------------------------------------------------------
+  LexBotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lexv2.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: polly-voice
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: polly:SynthesizeSpeech
+                Resource: "*"
+
+  LexBot:
+    Type: AWS::Lex::Bot
+    Properties:
+      Name: !Sub ${AWS::StackName}-arunika-bot
+      Description: Arunika Telecom customer care bot (demo)
+      RoleArn: !GetAtt LexBotRole.Arn
+      DataPrivacy:
+        ChildDirected: false
+      IdleSessionTTLInSeconds: 300
+      AutoBuildBotLocales: true
+      TestBotAliasSettings:
+        BotAliasLocaleSettings:
+          - LocaleId: en_US
+            BotAliasLocaleSetting:
+              Enabled: true
+              CodeHookSpecification:
+                LambdaCodeHook:
+                  CodeHookInterfaceVersion: "1.0"
+                  LambdaArn: !GetAtt FulfillmentFunction.Arn
+      BotLocales:
+        - LocaleId: en_US
+          Description: English. Bahasa Indonesia questions fall through to the Bedrock FAQ answerer.
+          NluConfidenceThreshold: 0.40
+          VoiceSettings:
+            VoiceId: Joanna
+            Engine: neural
+          SlotTypes:
+            - Name: ServiceArea
+              Description: Areas covered by the mock outage board
+              ValueSelectionSetting:
+                ResolutionStrategy: TOP_RESOLUTION
+              SlotTypeValues:
+                - SampleValue: { Value: Jakarta Selatan }
+                  Synonyms: [{ Value: South Jakarta }, { Value: Jaksel }, { Value: Kemang }]
+                - SampleValue: { Value: Jakarta Pusat }
+                  Synonyms: [{ Value: Central Jakarta }, { Value: Jakpus }]
+                - SampleValue: { Value: Jakarta Barat }
+                  Synonyms: [{ Value: West Jakarta }, { Value: Jakbar }]
+                - SampleValue: { Value: Bandung }
+                - SampleValue: { Value: Surabaya }
+                - SampleValue: { Value: Medan }
+                - SampleValue: { Value: Makassar }
+            - Name: ServiceType
+              Description: Product line affected by the outage
+              ValueSelectionSetting:
+                ResolutionStrategy: TOP_RESOLUTION
+              SlotTypeValues:
+                - SampleValue: { Value: Home Fiber }
+                  Synonyms: [{ Value: internet }, { Value: wifi }, { Value: broadband }, { Value: fibre }]
+                - SampleValue: { Value: Mobile }
+                  Synonyms: [{ Value: mobile data }, { Value: signal }, { Value: 4G }, { Value: phone }]
+          Intents:
+            - Name: CheckBalance
+              Description: Bill / balance inquiry, answered from the mock billing system
+              SampleUtterances:
+                - Utterance: check my balance
+                - Utterance: how much is my bill
+                - Utterance: bill inquiry
+                - Utterance: what do I owe
+                - Utterance: when is my bill due
+                - Utterance: I want to check my bill
+                - Utterance: my account number is {AccountNumber}
+                - Utterance: check balance for {AccountNumber}
+              FulfillmentCodeHook:
+                Enabled: true
+              SlotPriorities:
+                - Priority: 1
+                  SlotName: AccountNumber
+              Slots:
+                - Name: AccountNumber
+                  Description: 8-digit account number printed on the bill
+                  SlotTypeName: AMAZON.AlphaNumeric
+                  ValueElicitationSetting:
+                    SlotConstraint: Required
+                    PromptSpecification:
+                      MaxRetries: 2
+                      MessageGroupsList:
+                        - Message:
+                            PlainTextMessage:
+                              Value: Sure. What is your 8-digit account number? It's at the top of your bill.
+            - Name: ReportOutage
+              Description: Report a service outage, answered from the mock outage board
+              SampleUtterances:
+                - Utterance: my internet is down
+                - Utterance: report an outage
+                - Utterance: no signal
+                - Utterance: wifi not working
+                - Utterance: there is an outage
+                - Utterance: my {ServiceType} is not working
+                - Utterance: "{ServiceType} is down in {ServiceArea}"
+                - Utterance: outage in {ServiceArea}
+              FulfillmentCodeHook:
+                Enabled: true
+              SlotPriorities:
+                - Priority: 1
+                  SlotName: ServiceType
+                - Priority: 2
+                  SlotName: ServiceArea
+              Slots:
+                - Name: ServiceType
+                  SlotTypeName: ServiceType
+                  ValueElicitationSetting:
+                    SlotConstraint: Required
+                    PromptSpecification:
+                      MaxRetries: 2
+                      MessageGroupsList:
+                        - Message:
+                            PlainTextMessage:
+                              Value: Sorry to hear that. Is it your Home Fiber internet or your Mobile service?
+                - Name: ServiceArea
+                  SlotTypeName: ServiceArea
+                  ValueElicitationSetting:
+                    SlotConstraint: Required
+                    PromptSpecification:
+                      MaxRetries: 2
+                      MessageGroupsList:
+                        - Message:
+                            PlainTextMessage:
+                              Value: Which area are you in? For example Jakarta Selatan, Bandung or Surabaya.
+            - Name: TalkToAgent
+              Description: Customer explicitly asks for a human
+              SampleUtterances:
+                - Utterance: agent
+                - Utterance: talk to an agent
+                - Utterance: speak to a human
+                - Utterance: customer service please
+                - Utterance: I want to talk to someone
+                - Utterance: representative
+                - Utterance: complaint
+              FulfillmentCodeHook:
+                Enabled: true
+            - Name: Goodbye
+              Description: Customer is done
+              SampleUtterances:
+                - Utterance: no thanks
+                - Utterance: that's all
+                - Utterance: nothing else
+                - Utterance: bye
+                - Utterance: no
+                - Utterance: I'm done
+              FulfillmentCodeHook:
+                Enabled: true
+            - Name: FallbackIntent
+              Description: No intent matched; the Lambda answers from the FAQ document via Bedrock
+              ParentIntentSignature: AMAZON.FallbackIntent
+              FulfillmentCodeHook:
+                Enabled: true
+
+  # Lex aliases point at immutable numbered versions. NOTE: an update to LexBot alone does
+  # not publish a new version; rename this logical ID (e.g. LexBotVersion2) when the bot changes.
+  LexBotVersion:
+    Type: AWS::Lex::BotVersion
+    Properties:
+      BotId: !Ref LexBot
+      Description: Published by CloudFormation
+      BotVersionLocaleSpecification:
+        - LocaleId: en_US
+          BotVersionLocaleDetails:
+            SourceBotVersion: DRAFT
+
+  LexBotAlias:
+    Type: AWS::Lex::BotAlias
+    Properties:
+      BotId: !Ref LexBot
+      BotAliasName: live
+      Description: Alias used by the Amazon Connect flow (never use TestBotAlias in production)
+      BotVersion: !GetAtt LexBotVersion.BotVersion
+      BotAliasLocaleSettings:
+        - LocaleId: en_US
+          BotAliasLocaleSetting:
+            Enabled: true
+            CodeHookSpecification:
+              LambdaCodeHook:
+                CodeHookInterfaceVersion: "1.0"
+                LambdaArn: !GetAtt FulfillmentFunction.Arn
+
+  # Lets the Connect instance use the bot. Connect adds the matching statement to the
+  # bot alias resource-based policy for us.
+  LexBotIntegration:
+    Type: AWS::Connect::IntegrationAssociation
+    Properties:
+      InstanceId: !GetAtt ConnectInstance.Arn
+      IntegrationType: LEX_BOT
+      IntegrationArn: !GetAtt LexBotAlias.Arn
+
+  # ---------------------------------------------------------------------------
+  # Contact flow (source of truth: connect/flows/inbound-flow.json)
+  # ---------------------------------------------------------------------------
+  InboundFlow:
+    Type: AWS::Connect::ContactFlow
+    DependsOn: LexBotIntegration
+    Metadata:
+      cfn-lint:
+        config:
+          # The flow JSON (with ${LexBotAliasArn} and ${SupportQueueArn}) is injected by
+          # scripts/render_template.py, so the variables look unused in this source file.
+          ignore_checks: [W1019, W1020]
+    Properties:
+      InstanceArn: !GetAtt ConnectInstance.Arn
+      Name: Arunika Inbound - AI Assistant
+      Description: Greets, enables Contact Lens, runs the Lex bot, branches on intent and queues to an agent
+      Type: CONTACT_FLOW
+      State: ACTIVE
+      Content: !Sub
+        - "__INBOUND_FLOW_JSON__"
+        - LexBotAliasArn: !GetAtt LexBotAlias.Arn
+          SupportQueueArn: !GetAtt CustomerCareQueue.QueueArn
+
+Outputs:
+  ConnectInstanceId:
+    Value: !GetAtt ConnectInstance.Id
+  ConnectInstanceArn:
+    Value: !GetAtt ConnectInstance.Arn
+  ConnectAccessUrl:
+    Description: Agent / admin login URL (CONNECT_MANAGED users)
+    Value: !Sub https://${InstanceAlias}.my.connect.aws
+  InboundFlowArn:
+    Value: !GetAtt InboundFlow.ContactFlowArn
+  CustomerCareQueueArn:
+    Value: !GetAtt CustomerCareQueue.QueueArn
+  RoutingProfileArn:
+    Value: !GetAtt CustomerCareRoutingProfile.RoutingProfileArn
+  LexBotId:
+    Value: !Ref LexBot
+  LexBotAliasArn:
+    Value: !GetAtt LexBotAlias.Arn
+  FulfillmentFunctionName:
+    Value: !Ref FulfillmentFunction
+  StorageBucketName:
+    Description: Chat transcripts, call recordings and Contact Lens output (emptied by teardown.sh)
+    Value: !Ref StorageBucket

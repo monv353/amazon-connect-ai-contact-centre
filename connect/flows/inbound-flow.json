@@ -1,0 +1,231 @@
+{
+  "Version": "2019-10-30",
+  "StartAction": "enable-logging",
+  "Metadata": {
+    "entryPointPosition": { "x": 40, "y": 40 },
+    "ActionMetadata": {
+      "enable-logging": { "position": { "x": 160, "y": 40 } },
+      "set-language": { "position": { "x": 400, "y": 40 } },
+      "enable-contact-lens": { "position": { "x": 640, "y": 40 } },
+      "greeting": { "position": { "x": 880, "y": 40 } },
+      "main-menu-bot": { "position": { "x": 160, "y": 320 } },
+      "anything-else-bot": { "position": { "x": 520, "y": 320 } },
+      "check-faq-answered": { "position": { "x": 880, "y": 320 } },
+      "save-bot-context": { "position": { "x": 160, "y": 640 } },
+      "set-queue": { "position": { "x": 400, "y": 640 } },
+      "check-hours": { "position": { "x": 640, "y": 640 } },
+      "transfer-message": { "position": { "x": 880, "y": 640 } },
+      "transfer-to-queue": { "position": { "x": 1120, "y": 640 } },
+      "after-hours": { "position": { "x": 880, "y": 900 } },
+      "queue-full": { "position": { "x": 1120, "y": 900 } },
+      "bot-error": { "position": { "x": 400, "y": 900 } },
+      "disconnect": { "position": { "x": 1360, "y": 900 } }
+    }
+  },
+  "Actions": [
+    {
+      "Identifier": "enable-logging",
+      "Type": "UpdateFlowLoggingBehavior",
+      "Parameters": { "FlowLoggingBehavior": "Enabled" },
+      "Transitions": { "NextAction": "set-language" }
+    },
+    {
+      "Identifier": "set-language",
+      "Type": "UpdateContactData",
+      "Parameters": { "LanguageCode": "en-US", "TargetContact": "Current" },
+      "Transitions": {
+        "NextAction": "enable-contact-lens",
+        "Errors": [{ "NextAction": "enable-contact-lens", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "enable-contact-lens",
+      "Type": "UpdateContactRecordingBehavior",
+      "Parameters": {
+        "RecordingBehavior": { "RecordedParticipants": ["Agent", "Customer"] },
+        "AnalyticsBehavior": {
+          "Enabled": "True",
+          "AnalyticsLanguage": "en-US",
+          "AnalyticsRedactionBehavior": "Enabled",
+          "AnalyticsRedactionResults": "RedactedAndOriginal",
+          "AnalyticsRedactionMaskMode": "EntityType",
+          "ChannelConfiguration": {
+            "Chat": { "AnalyticsModes": ["ContactLens"] },
+            "Voice": { "AnalyticsModes": ["RealTime"] }
+          },
+          "SentimentConfiguration": { "Enabled": "True" },
+          "SummaryConfiguration": { "SummaryModes": ["PostContact"] }
+        }
+      },
+      "Transitions": { "NextAction": "greeting" }
+    },
+    {
+      "Identifier": "greeting",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Selamat datang! Welcome to Arunika Telecom. I'm Ari, your virtual assistant."
+      },
+      "Transitions": {
+        "NextAction": "main-menu-bot",
+        "Errors": [{ "NextAction": "main-menu-bot", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "main-menu-bot",
+      "Type": "ConnectParticipantWithLexBot",
+      "Parameters": {
+        "Text": "How can I help you today? You can check your bill, report an outage, ask a question about our plans, or ask for an agent.",
+        "LexV2Bot": { "AliasArn": "${LexBotAliasArn}" }
+      },
+      "Transitions": {
+        "NextAction": "save-bot-context",
+        "Conditions": [
+          { "NextAction": "anything-else-bot", "Condition": { "Operator": "Equals", "Operands": ["CheckBalance"] } },
+          { "NextAction": "anything-else-bot", "Condition": { "Operator": "Equals", "Operands": ["ReportOutage"] } },
+          { "NextAction": "save-bot-context", "Condition": { "Operator": "Equals", "Operands": ["TalkToAgent"] } },
+          { "NextAction": "check-faq-answered", "Condition": { "Operator": "Equals", "Operands": ["FallbackIntent"] } },
+          { "NextAction": "disconnect", "Condition": { "Operator": "Equals", "Operands": ["Goodbye"] } }
+        ],
+        "Errors": [
+          { "NextAction": "save-bot-context", "ErrorType": "NoMatchingCondition" },
+          { "NextAction": "bot-error", "ErrorType": "NoMatchingError" }
+        ]
+      }
+    },
+    {
+      "Identifier": "anything-else-bot",
+      "Type": "ConnectParticipantWithLexBot",
+      "Parameters": {
+        "Text": "Is there anything else I can help you with?",
+        "LexV2Bot": { "AliasArn": "${LexBotAliasArn}" }
+      },
+      "Transitions": {
+        "NextAction": "save-bot-context",
+        "Conditions": [
+          { "NextAction": "anything-else-bot", "Condition": { "Operator": "Equals", "Operands": ["CheckBalance"] } },
+          { "NextAction": "anything-else-bot", "Condition": { "Operator": "Equals", "Operands": ["ReportOutage"] } },
+          { "NextAction": "save-bot-context", "Condition": { "Operator": "Equals", "Operands": ["TalkToAgent"] } },
+          { "NextAction": "check-faq-answered", "Condition": { "Operator": "Equals", "Operands": ["FallbackIntent"] } },
+          { "NextAction": "disconnect", "Condition": { "Operator": "Equals", "Operands": ["Goodbye"] } }
+        ],
+        "Errors": [
+          { "NextAction": "save-bot-context", "ErrorType": "NoMatchingCondition" },
+          { "NextAction": "bot-error", "ErrorType": "NoMatchingError" }
+        ]
+      }
+    },
+    {
+      "Identifier": "check-faq-answered",
+      "Type": "Compare",
+      "Parameters": { "ComparisonValue": "$.Lex.SessionAttributes.faqAnswered" },
+      "Transitions": {
+        "NextAction": "save-bot-context",
+        "Conditions": [
+          { "NextAction": "anything-else-bot", "Condition": { "Operator": "Equals", "Operands": ["true"] } }
+        ],
+        "Errors": [{ "NextAction": "save-bot-context", "ErrorType": "NoMatchingCondition" }]
+      }
+    },
+    {
+      "Identifier": "save-bot-context",
+      "Type": "UpdateContactAttributes",
+      "Parameters": {
+        "TargetContact": "Current",
+        "Attributes": {
+          "botLastIntent": "$.Lex.IntentName",
+          "botTicketId": "$.Lex.SessionAttributes.ticketId",
+          "botAccountStatus": "$.Lex.SessionAttributes.accountStatus",
+          "botPlan": "$.Lex.SessionAttributes.plan"
+        }
+      },
+      "Transitions": {
+        "NextAction": "set-queue",
+        "Errors": [{ "NextAction": "set-queue", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "set-queue",
+      "Type": "UpdateContactTargetQueue",
+      "Parameters": { "QueueId": "${SupportQueueArn}" },
+      "Transitions": {
+        "NextAction": "check-hours",
+        "Errors": [{ "NextAction": "bot-error", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "check-hours",
+      "Type": "CheckHoursOfOperation",
+      "Parameters": {},
+      "Transitions": {
+        "NextAction": "transfer-message",
+        "Conditions": [
+          { "NextAction": "transfer-message", "Condition": { "Operator": "Equals", "Operands": ["True"] } },
+          { "NextAction": "after-hours", "Condition": { "Operator": "Equals", "Operands": ["False"] } }
+        ],
+        "Errors": [{ "NextAction": "transfer-message", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "transfer-message",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Connecting you to a customer care agent now. They can see this conversation, so you won't need to repeat yourself."
+      },
+      "Transitions": {
+        "NextAction": "transfer-to-queue",
+        "Errors": [{ "NextAction": "transfer-to-queue", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "transfer-to-queue",
+      "Type": "TransferContactToQueue",
+      "Parameters": {},
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [
+          { "NextAction": "queue-full", "ErrorType": "QueueAtCapacity" },
+          { "NextAction": "bot-error", "ErrorType": "NoMatchingError" }
+        ]
+      }
+    },
+    {
+      "Identifier": "after-hours",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Our agents are available from 08:00 to 22:00 WIB. You can keep using me any time for billing, outages and questions about our plans."
+      },
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [{ "NextAction": "disconnect", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "queue-full",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "All our agents are busy right now. Please try again in a few minutes, or use the Arunika app."
+      },
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [{ "NextAction": "disconnect", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "bot-error",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Sorry, something went wrong on our side. Please try again shortly."
+      },
+      "Transitions": {
+        "NextAction": "disconnect",
+        "Errors": [{ "NextAction": "disconnect", "ErrorType": "NoMatchingError" }]
+      }
+    },
+    {
+      "Identifier": "disconnect",
+      "Type": "DisconnectParticipant",
+      "Parameters": {},
+      "Transitions": {}
+    }
+  ]
+}
